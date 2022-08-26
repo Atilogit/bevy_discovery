@@ -4,7 +4,7 @@
 //! Example:
 //! ```
 //! use bevy::prelude::*;
-//! 
+//!
 //! #[macro_use]
 //! extern crate bevy_discovery;
 //!
@@ -28,7 +28,7 @@
 //! ```
 //!
 //! ## Compile time performance
-//! 
+//!
 //! <table>
 //!     <tr>
 //!         <td></td>
@@ -54,7 +54,7 @@ use std::{
     fs::{File, OpenOptions},
     hash::{Hash, Hasher},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
@@ -132,7 +132,7 @@ pub fn derive_discovery_plugin(input: proc_macro::TokenStream) -> proc_macro::To
 
     (quote! {
         impl Plugin for #input_ident {
-            fn build(&self, app: &mut AppBuilder) {
+            fn build(&self, app: &mut App) {
                 app#ts;
             }
         }
@@ -146,6 +146,18 @@ fn search_file_cache(
     ts: &mut TokenStream,
     module_path: &TokenStream,
 ) {
+    // regex::Regex::new(r"[/\\]r#[/\\]").unwrap();
+    let filepath: PathBuf = filepath
+        .components()
+        .into_iter()
+        .filter(|c| {
+            if let Component::Normal(s) = c {
+                !s.to_str().unwrap().starts_with("r#")
+            } else {
+                true
+            }
+        })
+        .collect();
     let fp = filepath.display().to_string();
     let last_modified = filepath
         .metadata()
@@ -154,7 +166,7 @@ fn search_file_cache(
         .expect("cannot read last modified")
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
-    if let Some((filepath, entry)) = cache.remove_entry(filepath) {
+    if let Some((filepath, entry)) = cache.remove_entry(&filepath) {
         let module_path = syn::parse_str::<syn::Path>(&entry.module_path).unwrap();
         let module_path = &quote! { #module_path };
         if last_modified == entry.last_modified {
@@ -169,7 +181,7 @@ fn search_file_cache(
             }
 
             for file in entry.referenced_files.iter() {
-                search_file_cache(&file, cache, ts, module_path);
+                search_file_cache(file, cache, ts, module_path);
             }
             cache.insert(filepath, entry);
         } else {
@@ -257,15 +269,16 @@ fn search_contents(
                 if let Some(a) = f
                     .attrs
                     .iter()
+                    .filter(|a| a.path.get_ident().is_some())
                     .find(|a| a.path.get_ident().unwrap() == "system")
                 {
                     let ident = &f.sig.ident;
                     let stage = a.parse_args::<TokenStream>().ok();
                     let path = &quote! { #module_path::#ident };
                     let addition = if let Some(stage) = &stage {
-                        quote! { .add_system_to_stage( #stage, #path.system()) }
+                        quote! { .add_system_to_stage( #stage, #path) }
                     } else {
-                        quote! { .add_system(#path.system()) }
+                        quote! { .add_system(#path) }
                     };
                     csr.direct_additions.push(SystemEntry {
                         path: path.to_string(),
@@ -284,10 +297,9 @@ fn search_contents(
                 match &modd.content {
                     Some((_, content)) => {
                         let mut subcsr = search_contents(content, &path, ts, &dir, cache);
-                        csr.direct_additions
-                            .extend(subcsr.direct_additions.drain(..));
+                        csr.direct_additions.append(&mut subcsr.direct_additions);
                         csr.direct_referenced_paths
-                            .extend(subcsr.direct_referenced_paths.drain(..));
+                            .append(&mut subcsr.direct_referenced_paths);
                     }
                     None => {
                         let mut filepath = dir;
